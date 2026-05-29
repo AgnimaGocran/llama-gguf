@@ -372,7 +372,16 @@ impl Engine {
         // Load model weights
         tracing::info!("Loading model weights...");
         let loader = ModelLoader::load(&config.model_path)?;
-        let model_config = loader.config().clone();
+        let mut model_config = loader.config().clone();
+        if let Some(max_ctx) = config.max_context_len {
+            if max_ctx > 0 && max_ctx < model_config.max_seq_len {
+                tracing::info!(
+                    "Capping context length from {} to {} (max_context_len)",
+                    model_config.max_seq_len, max_ctx,
+                );
+                model_config.max_seq_len = max_ctx;
+            }
+        }
         tracing::info!(
             "Model: {} layers, {} heads, {} hidden dim, {} ctx",
             model_config.num_layers,
@@ -391,7 +400,17 @@ impl Engine {
                 Box::new(bert_model),
             )
         } else {
-            let concrete_model = loader.build_model()?;
+            let mut concrete_model = loader.build_model()?;
+
+            // Eager dequantization for CPU: llama-gguf does not have optimized
+            // quantized GEMM kernels for all GGML types (e.g. Q3K falls back to
+            // full dequantize-on-the-fly per token, which is ~300x slower).
+            // Dequantizing once at load time trades RAM for speed.
+            if !config.use_gpu {
+                tracing::info!("Eagerly dequantizing model weights to F32 for CPU inference...");
+                concrete_model.dequantize_weights()?;
+                tracing::info!("Eager dequantization complete.");
+            }
 
             // When CUDA is available we try to create a GpuModelWrapper first.
             // This runs the entire forward pass on GPU with pre-allocated scratch

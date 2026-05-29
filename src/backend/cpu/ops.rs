@@ -989,14 +989,20 @@ pub fn vec_mat(a: &Tensor, b: &Tensor, out: &mut Tensor) -> BackendResult<()> {
     let out_data = out.as_f32_mut()?;
 
     // Compute y[j] = sum_i x[i] * W[i,j] for each j
-    // GGUF column-major: W[i,j] is at index i + j * k
-    out_data.par_iter_mut().enumerate().for_each(|(j, o)| {
-        let mut sum = 0.0f32;
-        for i in 0..k {
-            sum += a_data[i] * b_data[i + j * k];
+    // GGUF column-major: each column j is contiguous at b_data[j*k .. (j+1)*k]
+    // Use plain iter for small n to avoid Rayon task overhead (critical for
+    // autoregressive inference where this is called 200+ times per token).
+    if n < 4096 {
+        for j in 0..n {
+            let col = &b_data[j * k..(j + 1) * k];
+            out_data[j] = super::simd::dot_f32(a_data, col);
         }
-        *o = sum;
-    });
+    } else {
+        out_data.par_iter_mut().enumerate().for_each(|(j, o)| {
+            let col = &b_data[j * k..(j + 1) * k];
+            *o = super::simd::dot_f32(a_data, col);
+        });
+    }
 
     Ok(())
 }

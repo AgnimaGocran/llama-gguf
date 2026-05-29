@@ -3,6 +3,7 @@
 //! This module provides common layer types used in transformer models.
 
 use crate::backend::{Backend, BackendResult};
+use crate::backend::cpu::ops::dequantize;
 use crate::tensor::{DType, Tensor};
 
 use super::error::{ModelError, ModelResult};
@@ -73,6 +74,18 @@ impl Linear {
             }
         }
 
+        Ok(())
+    }
+
+    /// Dequantize weight to F32 in-place (eager dequantization for CPU inference).
+    pub fn dequantize_in_place(&mut self) -> ModelResult<()> {
+        if !self.weight.dtype().is_quantized() {
+            return Ok(());
+        }
+        let mut f32_weight = Tensor::zeros(self.weight.shape().to_vec(), DType::F32);
+        dequantize(&self.weight, &mut f32_weight)
+            .map_err(|e| ModelError::ConfigError(format!("dequantize: {}", e)))?;
+        self.weight = f32_weight;
         Ok(())
     }
 
@@ -869,6 +882,15 @@ impl Attention {
         self.wo.forward(&attn_tensor, &mut out, backend)?;
         Ok(out)
     }
+
+    /// Dequantize all attention weights to F32.
+    pub fn dequantize_weights(&mut self) -> ModelResult<()> {
+        self.wq.dequantize_in_place()?;
+        self.wk.dequantize_in_place()?;
+        self.wv.dequantize_in_place()?;
+        self.wo.dequantize_in_place()?;
+        Ok(())
+    }
 }
 
 /// Feed-forward network (MLP) layer
@@ -927,6 +949,13 @@ impl FeedForward {
 
         Ok(())
     }
+
+    pub fn dequantize_weights(&mut self) -> ModelResult<()> {
+        self.w_gate.dequantize_in_place()?;
+        self.w_up.dequantize_in_place()?;
+        self.w_down.dequantize_in_place()?;
+        Ok(())
+    }
 }
 
 /// Feed-forward network WITHOUT gate projection (GPT-2, BLOOM, GPT-NeoX, etc.)
@@ -979,6 +1008,12 @@ impl NoGateFeedForward {
         }
 
         self.w_down.forward(&up, out, backend)?;
+        Ok(())
+    }
+
+    pub fn dequantize_weights(&mut self) -> ModelResult<()> {
+        self.w_up.dequantize_in_place()?;
+        self.w_down.dequantize_in_place()?;
         Ok(())
     }
 }
@@ -1388,5 +1423,18 @@ impl TransformerLayer {
             }
             Ok(ffn_out)
         }
+    }
+
+    /// Dequantize all quantizable weights in this layer to F32.
+    pub fn dequantize_weights(&mut self) -> ModelResult<()> {
+        if let AttentionLayer::FullAttention(ref mut attn) = self.attn_layer {
+            attn.dequantize_weights()?;
+        }
+        match self.ffn_layer {
+            FfnLayer::Dense(ref mut ffn) => ffn.dequantize_weights()?,
+            FfnLayer::NoGate(ref mut ffn) => ffn.dequantize_weights()?,
+            _ => {}
+        }
+        Ok(())
     }
 }

@@ -132,6 +132,15 @@ impl LlamaModel {
         &self.layers
     }
 
+    /// Dequantize all quantized weights to F32 (eager dequantization for CPU inference).
+    pub fn dequantize_weights(&mut self) -> ModelResult<()> {
+        for layer in &mut self.layers {
+            layer.dequantize_weights()?;
+        }
+        self.output.dequantize_in_place()?;
+        Ok(())
+    }
+
     /// Decompose the model into its parts for GPU hybrid inference.
     /// The layers are moved out to avoid duplicating the weights.
     #[allow(clippy::type_complexity)]
